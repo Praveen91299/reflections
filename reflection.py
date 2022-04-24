@@ -1,25 +1,22 @@
 from openfermion.ops import FermionOperator, QubitOperator
 from openfermion.linalg import expectation
 from openfermion import load_operator, get_sparse_operator, FermionOperator, count_qubits, expectation
-from openfermion.transforms import normal_ordered, qubit_operator_to_pauli_sum
+from openfermion.transforms import normal_ordered, qubit_operator_to_pauli_sum, jordan_wigner
 from openfermion.utils import hermitian_conjugated, commutator
+from openfermion.hamiltonians import s_squared_operator
+
 from scipy.linalg import expm
+import json, os
 import numpy as np
+import matplotlib.pyplot as plt
 from sympy import Matrix
 from scipy.optimize import minimize
-from opt import evaluate_trial_energy, construct_configuration_wf
-import matplotlib.pyplot as plt
-import json, os
 from scipy.sparse import csc_matrix
 from math import ceil, floor, log10
-from openfermion.hamiltonians import s_squared_operator
-from scipy.sparse import csc_matrix
-from math import ceil, floor, log10
-from scipy.optimize import minimize
-from opt import evaluate_trial_energy, construct_configuration_wf
 import pathos.multiprocessing as multiprocessing
+
+from opt import evaluate_trial_energy, construct_configuration_wf
 from eos.utils.qcc.iqcc import iQCC_fixed_mf
-from openfermion.transforms import jordan_wigner
 
 iEj = lambda i, j: str(i)+'^ '+str(j)+' '
 ijE = lambda i, j: str(i)+'^ '+str(j)+'^ '
@@ -47,23 +44,17 @@ P = {
 
 poly_list = ['p11', 'p21', 'p22', 'p23', 'p24', 'p25', 'p26', 'p27', 'p28', 'p29']
 
-iter_count = 0
-
-
 def evaluate_energy_UCCSD(params, hamiltonian, rotations, reference_wf):
     U = expm(sum([a*b for a , b in zip(params[:], rotations)]))
     ans = U @ reference_wf
     return np.real(expectation(hamiltonian, ans))
 
-def callback_count(params):
-    global iter_count
-    iter_count +=1
-
 def mf_rotation_list(n_so):
     '''
     Provides list of k_pq operators
-    input: 
-    n_so Number of qubits
+
+    Arguments:
+        n_so (int): Number of qubits
     '''
     exp = []
     count = 0
@@ -76,8 +67,9 @@ def mf_rotation_list(n_so):
 def mf_rotation_list_complex(n_so):
     '''
     Provides list of K_pq' operators
-    input:
-    n_so Number of qubits
+
+    Arguments:
+        n_so (int): Number of qubits
     '''
     exp = []
     count = 0
@@ -89,13 +81,22 @@ def mf_rotation_list_complex(n_so):
 
 def mf_rotation_list_all(n_so):
     '''
-    
+    Provides list of K_pq and K_pq'
+
+    Arguments:
+        n_so (int): Number of qubits
     '''
     rot_real = mf_rotation_list(n_so)
     rot_complex = mf_rotation_list_complex(n_so)
     return rot_real + rot_complex
 
 def mf_rotation_list_doubles(n_so):
+    '''
+    Provides doubles excitation operators
+
+    Arguments:
+        n_so (int): Number of qubits
+    '''
     exp = []
     count = 0
     for i in range(n_so):
@@ -106,45 +107,21 @@ def mf_rotation_list_doubles(n_so):
                     count +=1
     return exp
 
-def evaluate_trial_energy(params,
-                          hamiltonian,
-                          mf_rotation_exponents,
-                          poly,
-                          tau,
-                          reference_wf):
-    V = expm(sum([a*b for a , b in zip(params[:], mf_rotation_exponents)]))
-    R = (V.conjugate().T) @ poly @ V
-    a = (1. + np.cos(tau))/2
-    b = - np.sin(tau)/2
-    c = (1. - np.cos(tau))/2
-
-    RH = R @ hamiltonian
-    h_rot = a * hamiltonian + 1.j * b * ((hamiltonian @ R) - RH) + c * RH @ R
-
-    return np.real(expectation(h_rot, reference_wf))
-
-def evaluate_trial_energy_tau(params,
-                          hamiltonian,
-                          mf_rotation_exponents,
-                          poly,
-                          reference_wf):
-    V = expm(sum([a*b for a , b in zip(params[1:], mf_rotation_exponents)]))
-    R = (V.conjugate().T) @ poly @ V
-    tau = params[0]
-    a = (1. + np.cos(tau))/2
-    b = - np.sin(tau)/2
-    c = (1. - np.cos(tau))/2
-
-    RH = R @ hamiltonian
-    h_rot = a * hamiltonian + 1.j * b * ((hamiltonian @ R) - RH) + c * RH @ R
-
-    return np.real(expectation(h_rot, reference_wf))
-
 def evaluate_trial_energy_tau_complex(params,
                           hamiltonian,
                           mf_rotation_exponents,
                           poly,
                           reference_wf):
+    '''
+    Energy estimate for a single reflection operator
+
+    Arguments:
+        params (list[float, list[float]]): [tau, [thetas]]
+        hamiltonian (numpy.ndarray): target hamiltonian
+        mf_rotation_exponents (list[numpy.ndarray]): mean-field rotations for V
+        poly (numpy.ndarray): reflection polynomial class conjugated
+        reference_wf (list[float]): reference state, for expectation evaluation
+    '''
     V = expm(sum([a*b for a , b in zip(params[1:], mf_rotation_exponents)]))
     R = (V.conjugate().T) @ poly @ V
     tau = params[0]
@@ -163,6 +140,17 @@ def evaluate_trial_energy_complex(params,
                                   poly,
                                   tau,
                                   reference_wf):
+    '''
+    Energy estimate for a single reflection operator, with tau and thetas separated.
+
+    Arguments:
+        params (list[float, list[float]]): [tau, [thetas]]
+        hamiltonian (numpy.ndarray): target hamiltonian
+        mf_rotation_exponents (list[numpy.ndarray]): mean-field rotations for V
+        poly (numpy.ndarray): reflection polynomial class conjugated
+        reference_wf (list[float]): reference state, for expectation evaluation
+        tau (float): tau
+    '''
     V = expm(sum([a*b for a , b in zip(params[:], mf_rotation_exponents)]))
     R = (V.conjugate().T) @ poly @ V
 
@@ -180,6 +168,16 @@ def evaluate_gradient_complex(params,
                               mf_rotation_exponents,
                               poly,
                               reference_wf):
+    '''
+    Gradient estimate for a single reflection operator
+
+    Arguments:
+        params (list[float, list[float]]): [thetas]
+        hamiltonian (numpy.ndarray): target hamiltonian
+        mf_rotation_exponents (list[numpy.ndarray]): mean-field rotations for V
+        poly (numpy.ndarray): reflection polynomial class conjugated
+        reference_wf (list[float]): reference state, for expectation evaluation
+    '''
     V = expm(sum([a*b for a , b in zip(params[:], mf_rotation_exponents)]))
     R = (V.conjugate().T) @ poly @ V
     RH = hamiltonian @ R - R @ hamiltonian
@@ -191,6 +189,13 @@ def evaluate_gradient_complex(params,
 # obtains kappa matrix for MFR only (second degree number preserving terms sum(a_p^ a_q) )
 # excludes constant terms
 def get_matrix(op, n_so):
+    '''
+    Returns anti hermitian kappa matrix that represents the mean-field rotation
+
+    Arguments:
+        op (FermionOperator): The exponent of the mean-field rotation
+        n_so (int): Number of qubits
+    '''
     op_terms = list(op.terms.items())
     matrix = np.zeros(shape = (n_so, n_so), dtype=complex)
     for term in op_terms:
@@ -200,6 +205,12 @@ def get_matrix(op, n_so):
 
 #reverse of get_matrix
 def get_operator(mat):
+    '''
+    Returns FermionOperator object represented by the anti-hermitian matrix mat
+
+    Arguments:
+        mat (array list[list[complex]])
+    '''
     op = 0
     for i in range(len(mat)):
         for j in range(len(mat[0])):
@@ -208,6 +219,14 @@ def get_operator(mat):
 
 # evaluates C^ B C where C is restricted to MFR only and C = e^A (e^-A B e^A)
 def BCH_symb(A, B, n_so):
+    '''
+    Returns FermionOperator object representing e^-A B e^A. e^A is restricted to mean-field rotations only.
+
+    Arguments:
+        A (FermionOperator): mean-field exponent
+        B (FermionOperator): operator conjugated
+        n_so (int): Number of qubits
+    '''
     B_list = list(B.terms.items())
     C = get_matrix(-A, n_so)
     V_mat = expm(C)
@@ -227,18 +246,42 @@ def BCH_symb(A, B, n_so):
 
 ################
 
-#to load data
+#Auxilliary functions
 def load_json(name, loc):
+    '''
+    Loads a json file
+
+    Arguments:
+        name (str): file name
+        loc (str): file directory location
+    '''
     with open(loc + name + '.json') as f:
         data = json.load(f)
     return data
 
 def dress_H_expectation(tau, hamiltonian, R, reference_wf):
+    '''
+    Dresses hamiltonian with a single reflection unitary and returns expectation at reference_wf state
+
+    Arguments:
+        tau (float): amplitude of R
+        hamiltonian (numpy.ndarray or scipy.sparse): target hamiltonian
+        R (numpy.ndarray or scipy.sparse): Reflection operator/generator
+        reference_wf (numpy.ndarray or list)
+    '''
     h_rot = dress_H(tau, hamiltonian, R)
     val = reference_wf.conjugate().T @ h_rot @ reference_wf
     return np.real(val[0, 0])
 
 def dress_H(tau, hamiltonian, R):
+    '''
+    Dresses hamiltonian with a single reflection unitary
+
+    Arguments:
+        tau (float): amplitude of R
+        hamiltonian (numpy.ndarray or scipy.sparse): target hamiltonian
+        R (numpy.ndarray or scipy.sparse): Reflection operator/generator
+    '''
     a = float((1. + np.cos(tau))/2)
     b = - float(np.sin(tau)/2)
     c = float((1. - np.cos(tau))/2)
@@ -248,6 +291,15 @@ def dress_H(tau, hamiltonian, R):
     return h_rot
 
 def dress_H_simult(taus, hamiltonian, R_list, reference_wf):
+    '''
+    Dresses hamiltonian with a list of reflection unitaries
+
+    Arguments:
+        taus (list[float]): amplitude(s) of R operators
+        hamiltonian (numpy.ndarray or scipy.sparse): target hamiltonian
+        R_list (list[numpy.ndarray or scipy.sparse]): Reflection operator/generator
+        reference_wf (numpy.ndarray or list)
+    '''
     for i in range(len(taus))[:-1]:
         hamiltonian = dress_H(taus[i], hamiltonian, R_list[i])
     return dress_H_expectation(taus[-1], hamiltonian, R_list[-1], reference_wf)
@@ -326,25 +378,68 @@ def plot_from_file(directory, filename, title = '', grid = False, ylabel = '', s
 ##################
 
 def get_V(params, mf_rotation_exponents):
+    '''
+    Returns mean-field rotation V
+
+    Arguments:
+        params (list[float]): coefficients of the rotations (thetas)
+        mf_rotation_exponents (list[numpy.ndarray or scipy.sparse]): mean-field lie algebra elements
+    '''
     return expm(sum([a*b for a , b in zip(params, mf_rotation_exponents)]))
 
 def get_rotation(params, poly, mf_rotation_exponents):
+    '''
+    Returns mean-field rotated reflection operator corresponding to polynomial poly
+
+    Arguments:
+        params (list[float]): coefficients of the rotations (thetas)
+        poly (numpy.ndarray or scipy.sparse): polynomial defining the rotation
+        mf_rotation_exponents (list[numpy.ndarray or scipy.sparse]): mean-field lie algebra elements
+    '''
     V = get_V(params, mf_rotation_exponents)
     return (V.conjugate().T) @ poly @ V
 
-def get_V_exp(params, k_pq):
-    return sum(params[i]*k_pq[i] for i in range(len(params)))
+def get_V_exp(params, mf_rotation_exponents):
+    '''
+    Returns the exponenet of mean-field rotation V
 
-def get_rotation_symb(params, poly, k_pq, n_so):
-    return BCH_symb(get_V_exp(params, k_pq), poly, n_so)
+    Arguments:
+        params (list[float]): coefficients of the rotations (thetas)
+        mf_rotation_exponents (list[numpy.ndarray or scipy.sparse]): mean-field lie algebra elements
+    '''
+    return sum(params[i]*mf_rotation_exponents[i] for i in range(len(params)))
 
-def evaluate_gradient_complex(params,
+def get_rotation_symb(params, poly, mf_rotation_exponents, n_so):
+    '''
+    Returns mean-field rotated reflection operator corresponding to polynomial poly symbollically (returns FermionOperator object)
+
+    Arguments:
+        params (list[float]): coefficients of the rotations (thetas)
+        poly (FermionOperator): polynomial defining the rotation
+        mf_rotation_exponents (list[FermionOperator]): mean-field lie algebra elements
+        n_so (int): number of qubits
+    '''
+    return BCH_symb(get_V_exp(params, mf_rotation_exponents), poly, n_so)
+
+def evaluate_gradient_complex_constraint(params,
                               hamiltonian,
                               mf_rotation_exponents,
                               poly,
                               V_list,
                               lam,
                               reference_wf):
+    '''
+    Gradient estimate for a single reflection operator, with added constraints of previous rotations using this poly class
+
+    Arguments:
+        params (list[float, list[float]]): [thetas]
+        hamiltonian (numpy.ndarray): target hamiltonian
+        mf_rotation_exponents (list[numpy.ndarray]): mean-field rotations for V
+        poly (numpy.ndarray): reflection polynomial class conjugated
+        V_list (list[numpy.ndarray or scipy.sparse]): list of MF rotations already obtained
+        lam (float): multiplier for constriant
+        reference_wf (list[float]): reference state, for expectation evaluation
+    '''
     V = get_V(params, mf_rotation_exponents)
     R = get_rotation(params, poly, mf_rotation_exponents)
     RH = hamiltonian @ R - R @ hamiltonian
@@ -355,17 +450,27 @@ def evaluate_gradient_complex(params,
         val += np.real(penality)
     return val
 
-def get_generators(n_so):
-    return mf_rotation_list(n_so) + mf_rotation_list_complex(n_so)
-
 def get_generators_sparse(n_so):
-    k_pq =  get_generators(n_so)
+    '''
+    Returns sparse MF lie algebra elements/rotations
+
+    Arguments:
+        n_so (int): number of qubits
+    '''
+    k_pq =  mf_rotation_list_all(n_so)
     k_pq_sparse = [get_sparse_operator(element, n_so).toarray() for element in k_pq]
     return k_pq_sparse
 
 #returns labels of top
 def get_top_list(grad_list, n_gens):
     #get minimum
+    '''
+    Returns list of polynomial classes that have lowest gradients
+
+    Arguments:
+        grad_list (dict[str:float]): gradients of different classes
+        n_gens (int): number of generators to select
+    '''
     values = list(grad_list.values())
     selected = sorted(values)[:n_gens]
     keys = list(grad_list.keys())
@@ -373,10 +478,24 @@ def get_top_list(grad_list, n_gens):
     return sorted_list
 
 def round_to(x, a):
+    '''
+    Rounding float to specific number of decimals in scientific notation todo
+
+    Arguments:
+        x (float): number to rounded
+        a (int): Number of decimals
+    '''
     return round(x, a - 1 - int(floor(log10(abs(x)))))
 
 #get minimum distinct classes, upto 2 significant digits
 def get_top_list_2(grad_list, n_gens):
+    '''
+    Gets classes of top gradient, from distinct gradient classes.
+
+    Arguments:
+        grad_list (dict[str:float]): gradients of different polynomial classes
+        n_gens (int): number of distinct classes to choose
+    '''
     keys = list(grad_list.keys())
     rounded_values = [round_to(x, 2) for x in list(grad_list.values())]
     sorted_values = sorted(rounded_values)
@@ -393,7 +512,7 @@ def get_top_list_2(grad_list, n_gens):
 
 def maximize_grad(arg):
     x0, hamilt_sparse, k_pq_sparse, poly, V_list, lam, hf_statevector, method, tol = arg
-    result = minimize(evaluate_gradient_complex,
+    result = minimize(evaluate_gradient_complex_constraint,
                      x0=x0,
                      args=(hamilt_sparse, k_pq_sparse, poly, V_list, lam, hf_statevector),
                      method=method,
@@ -410,11 +529,25 @@ def minimize_energy(arg):
     return result
 
 #an iterative version of FR
-def FR_ranked(HAMILTONIAN, HF_OCCUPATIONS, n_gens, layers, cpu_pool, trials=5, lam = 0.01, coeff_tol = 0.001, select_type = 1):
+def FR_ranked(HAMILTONIAN, HF_OCCUPATIONS, n_gens, layers, cpu_pool, trials=5, lam = 0.01, select_type = 1):
+    '''
+    An iterative version of the fermionic reflection method, similar to iQCC
 
+    Arguments:
+        HAMILTONIAN (FermionOperator): Target hamiltonian
+        HF_OCCUPATIONS (list[float]): reference occupations
+        n_gens (int): number of generators to consider per layer
+        layers (int): number of layers to iterate
+
+    Keyword arguments:
+        cpu_pool (): cpu pool for multiprocessing
+        trials (int): Number of trials for optimizations
+        lam (float): constriant multiplier constant
+        select_type (int): gradient class selection criteria
+    '''
     #generators
     n_so = count_qubits(HAMILTONIAN)
-    k_pq = get_generators(n_so)
+    k_pq = mf_rotation_list_all(n_so)
     k_pq_sparse = get_generators_sparse(n_so)
 
     hamilt_sparse = get_sparse_operator(HAMILTONIAN, n_so)
@@ -481,8 +614,6 @@ def FR_ranked(HAMILTONIAN, HF_OCCUPATIONS, n_gens, layers, cpu_pool, trials=5, l
                 grad_list[label] = grad_min
                 param_list[label] = params[grad_min_idx]
                 V_list[poly_list[i]] += [get_V(params[grad_min_idx], k_pq_sparse)]
-        #print(grad_list)
-        #print(param_list)
 
         #choose top gradients
         if select_type == 1:
@@ -525,24 +656,21 @@ def FR_ranked(HAMILTONIAN, HF_OCCUPATIONS, n_gens, layers, cpu_pool, trials=5, l
 
         print("\n Energy after {} layers: {}".format(layer + 1, energy_min))
         #dress hamiltonian and continue
-        #print('\n # of terms in dressed hamiltonian = {}'.format(len(list(HAMILTONIAN.terms.items()))))
         for i in range(n_gens):
             hamilt_sparse = dress_H(params_min[i], hamilt_sparse, list(R_list.values())[i])
-            #print(HAMILTONIAN)
-            #print(list(R_list_symb.values())[i])
-        #    print('yes')
-        #    HAMILTONIAN = dress_H_symb(params_min[i], HAMILTONIAN, list(R_list_symb.values())[i])
-        #    print('\n # of terms in dressed hamiltonian = {}'.format(len(list(HAMILTONIAN.terms.items()))))
         hamilt_sparse = csc_matrix(hamilt_sparse)
         final_energies += [energy_min]
-        #l = len(list(HAMILTONIAN.terms.items()))
-        #print('\n Number of terms in dressed Hamiltonian after layer {}: {} '.format(layer+1, l))
-        #hamiltonian_length[layer+1] = [l]
     return final_energies, hamiltonian_length
 
 #####################################################
 
 def construct_configuration_op(hf_occupations):
+    '''
+    Returns FermionOperator that represents the initial occupation state
+
+    Arguments:
+        hf_occupations (list[float]): reference state occupations
+    '''
     op = 1.0
     for i in range(len(hf_occupations)):
         if hf_occupations[i] == 1:
@@ -557,6 +685,18 @@ def evaluate_gradient_complex_symb(params,
                               V_2,
                               lam,
                               hf_occupations):
+    '''
+    Gradient estimate for a single reflection operator, with added constraints of previous rotations using this poly class, done symbollically
+
+    Arguments:
+        params (list[float]): [thetas]
+        hamiltonian (FermionOperator): target hamiltonian
+        mf_rotation_exponents (list[FermionOperator]): mean-field rotations for V
+        poly (FermionOperator): reflection polynomial class conjugated
+        V_2 (FermionOperator): MF rotation already obtained
+        lam (float): multiplier for constriant
+        hf_occupations (list[float]): reference occupation state, for expectation evaluation
+    '''
     n_so = count_qubits(hamiltonian)
     exp_V = sum(params[i]*mf_rotation_exponents[i] for i in range(len(params)))
     R = BCH_symb(exp_V, poly, n_so)
@@ -582,6 +722,14 @@ def maximize_grad_symb(arg):
     return result
 
 def dress_H_symb(tau, hamiltonian, R):
+    '''
+    Dresses hamiltonian with a single reflection unitary, symbollically
+
+    Arguments:
+        tau (float): amplitude of R
+        hamiltonian (FermionOperator): target hamiltonian
+        R (FermionOperator): Reflection operator/generator
+    '''
     a = float((1. + np.cos(tau))/2)
     b = - float(np.sin(tau)/2)
     c = float((1. - np.cos(tau))/2)
@@ -594,12 +742,23 @@ def dress_H_symb(tau, hamiltonian, R):
 def get_V_exp(params, k_pq):
     return sum(params[i]*k_pq[i] for i in range(len(params)))
 
-def get_v_exp(params, k_pq):
-    return sum(params[i]*k_pq[i] for i in range(len(params)))
-
 #an iterative version of FR
-def FR_ranked_symb(HAMILTONIAN, HF_OCCUPATIONS, n_gens, layers, cpu_pool, trials=5, lam = 0.01, coeff_tol = 0.001, select_type = 1):
+def FR_ranked_symb(HAMILTONIAN, HF_OCCUPATIONS, n_gens, layers, cpu_pool, trials=5, lam = 0.01, select_type = 1):
+    '''
+    An iterative version of the fermionic reflection method, similar to iQCC, symbollically
 
+    Arguments:
+        HAMILTONIAN (FermionOperator): Target hamiltonian
+        HF_OCCUPATIONS (list[float]): reference occupations
+        n_gens (int): number of generators to consider per layer
+        layers (int): number of layers to iterate
+
+    Keyword arguments:
+        cpu_pool (): cpu pool for multiprocessing
+        trials (int): Number of trials for optimizations
+        lam (float): constriant multiplier constant
+        select_type (int): gradient class selection criteria
+    '''
     #generators
     n_so = count_qubits(HAMILTONIAN)
     rot_real = mf_rotation_list(n_so)
@@ -660,7 +819,6 @@ def FR_ranked_symb(HAMILTONIAN, HF_OCCUPATIONS, n_gens, layers, cpu_pool, trials
                 ]
             opt_runs = cpu_pool.map(maximize_grad_symb, args)
             opt_runs_results = np.reshape(opt_runs, (len(poly_list), trials+1))
-            #opt_runs_results = [maximize_grad_symb(arg) for arg in args]
 
             #selecting best run for each class
             for i in range(len(poly_list)):
@@ -673,8 +831,6 @@ def FR_ranked_symb(HAMILTONIAN, HF_OCCUPATIONS, n_gens, layers, cpu_pool, trials
                 grad_list[label] = grad_min
                 param_list[label] = params[grad_min_idx]
                 V_list[poly_list[i]] += BCH_symb(-get_V_exp(params[grad_min_idx], k_pq), hf_op, n_so)
-        #print(grad_list)
-        #print(param_list)
 
         #choose top gradients
         if select_type == 1:
@@ -716,9 +872,9 @@ def FR_ranked_symb(HAMILTONIAN, HF_OCCUPATIONS, n_gens, layers, cpu_pool, trials
 
         print("\n Energy after {} layers: {}".format(layer + 1, energy_min))
         #dress hamiltonian and continue
-        #for i in range(n_gens):
+        for i in range(n_gens):
             #hamilt_sparse = dress_H(params_min[i], hamilt_sparse, list(R_list_sparse.values())[i])
-            #HAMILTONIAN = dress_H_symb(params_min[i], HAMILTONIAN, list(R_list.values())[i])
+            HAMILTONIAN = dress_H_symb(params_min[i], HAMILTONIAN, list(R_list.values())[i])
         hamilt_sparse = csc_matrix(hamilt_sparse)
         final_energies += [energy_min]
     return final_energies
@@ -747,6 +903,9 @@ def PauliString_from_Operator(op):
 
     return [PauliString.from_openfermion(a, coeff = b) for a,b in zip(list(op.terms.keys()), list(op.terms.values()))]
 def filter_empty_strings(pauli_list):
+    '''
+    Removes empty strings
+    '''
     filtered_list = []
     for a in pauli_list:
         if a._data != {}:
@@ -754,6 +913,16 @@ def filter_empty_strings(pauli_list):
     return filtered_list
 
 def mfr_gradient(params, h, ops, poly, ref):
+    '''
+    Returns gradient of a reflection operator
+
+    Arguments:
+        params (list(float)): coefficients of the mean field rotations
+        h (numpy.ndarray): target hamiltonian
+        ops (list[numpy.ndarray]): mean-field rotation elements
+        poly (numpy.ndarray): polynomial conjugated by MF rotations
+        ref (list[float]): reference state
+    '''
     V = get_V(params, ops)
     R = get_rotation(params, poly, ops)
     RH = h @ R - R @ h
@@ -769,7 +938,9 @@ def maximize_mfr_grad(arg):
                      tol=tol)
     return result
 
-
+'''
+Class get_grads - to evaluate and obtain gradients of different classes, and optimize energies.
+'''
 class get_grads:
     def __init__(self, hamiltonian, ref_occ, symb = 0):
         self.hamiltonian = hamiltonian
